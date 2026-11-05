@@ -5,6 +5,7 @@
 This project keeps a RAG knowledge base continuously in sync with a Confluence space. Instead of re-crawling and re-embedding every document on a schedule, it uses change data capture. When a page is created, updated, trashed or removed in Confluence, only that page is reprocessed and the vector index is updated. Answers from the RAG application then reflect recent edits within minutes, and the embedding cost stays proportional to what actually changed.
 
 #How it works
+
 Capture. A Confluence webhook sends page events to an AWS API Gateway endpoint. The endpoint writes straight into an SQS queue, so the webhook gets a fast response and no events are lost if downstream systems are slow. A dead-letter queue catches repeated failures.
 Enrich and land. A Lambda consumes the queue and verifies the webhook’s HMAC signature. Webhooks carry only the page ID and metadata, so the Lambda fetches the full page content from the Confluence REST API. It writes each event as a JSON file to S3. Deletions are recorded as delete events.
 Trigger. Each new S3 file fires a second Lambda that starts a Databricks job. It skips the trigger if a run is already queued, so a burst of edits produces one run rather than dozens.
@@ -14,6 +15,7 @@ Vector index. A Mosaic AI Vector Search Delta Sync index sits on the silver tabl
 
 
 #Key features
+
 Incremental and event-driven: updates arrive in minutes, with no full re-index.
 Handles deletes and edits correctly: removed pages disappear from search results.
 Resilient: SQS buffering, a DLQ, partial-batch failure reporting, and idempotent delete-then-insert logic.
