@@ -1,0 +1,30 @@
+bundle:
+  name: confluence-rag-cdc
+
+artifacts:
+  rag_pipeline_whl:
+    type: whl
+    build: python -m build --wheel
+    path: .
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:            { default: main }
+  schema:             { default: confluence_rag }
+  raw_path:           { description: "s3://<RawBucketName>/raw/  (needs a UC external location)" }
+  checkpoint_root:    { default: /Volumes/main/confluence_rag/checkpoints }
+  vs_endpoint:        { default: confluence-rag-endpoint }
+  embedding_endpoint: { default: databricks-gte-large-en }
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com

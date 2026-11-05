@@ -1,0 +1,44 @@
+resources:
+  jobs:
+    confluence_rag_job:
+      name: confluence-rag-cdc-${bundle.target}
+      max_concurrent_runs: 1
+      queue:
+        enabled: true          # extra triggers wait instead of failing
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "2"
+            dependencies:
+              - ./dist/*.whl
+
+      tasks:
+        - task_key: bronze
+          environment_key: default
+          python_wheel_task:
+            package_name: rag_pipeline
+            entry_point: bronze
+            parameters: &params
+              - "--catalog=${var.catalog}"
+              - "--schema=${var.schema}"
+              - "--raw_path=${var.raw_path}"
+              - "--checkpoint_root=${var.checkpoint_root}"
+              - "--vs_endpoint=${var.vs_endpoint}"
+              - "--embedding_endpoint=${var.embedding_endpoint}"
+
+        - task_key: silver
+          depends_on: [{ task_key: bronze }]
+          environment_key: default
+          python_wheel_task:
+            package_name: rag_pipeline
+            entry_point: silver
+            parameters: *params
+
+        - task_key: vector_sync
+          depends_on: [{ task_key: silver }]
+          environment_key: default
+          python_wheel_task:
+            package_name: rag_pipeline
+            entry_point: vector_sync
+            parameters: *params

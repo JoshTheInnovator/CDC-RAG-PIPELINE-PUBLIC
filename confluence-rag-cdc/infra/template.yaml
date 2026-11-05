@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: "Confluence CDC to API Gateway to SQS to Lambda to S3 to Lambda to Databricks job"
+
+Parameters:
+  ConfluenceBaseUrl:
+    Type: String
+    Description: e.g. https://your-domain.atlassian.net
+  SpaceKeys:
+    Type: String
+    Default: ""
+    Description: Comma-separated space keys to ingest (empty = all)
+  ConfluenceSecretArn:
+    Type: String
+    Description: 'Secrets Manager secret JSON with keys email and api_token'
+  DatabricksSecretArn:
+    Type: String
+    Description: 'Secrets Manager secret JSON with keys host and token'
+  DatabricksJobId:
+    Type: String
+    Description: Job id of the deployed confluence_rag_job
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: "Confluence webhook secret (HMAC X-Hub-Signature). Empty disables verification."
+
+Resources:
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  EventsDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventsDlq.Arn
+        maxReceiveCount: 5
+
+  ApiToSqsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: apigateway.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: send-to-sqs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt EventsQueue.Arn
+
+  # API Gateway -> SQS directly (no Lambda in the hot path)
+  WebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      DefinitionBody:
+        openapi: "3.0.1"
+        info: { title: confluence-webhook, version: "1.0" }
+        paths:
+          /confluence:
+            post:
+              responses:
+                "200": { description: accepted }
+              x-amazon-apigateway-integration:
+                type: aws
+                httpMethod: POST
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${EventsQueue.QueueName}"
+                credentials: !GetAtt ApiToSqsRole.Arn
+                passthroughBehavior: never
+                requestParameters:
+                  integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+                requestTemplates:
+                  application/json: |-
+                    Action=SendMessage&MessageBody=$util.urlEncode($input.body)#if($input.params('X-Hub-Signature') != '')&MessageAttribute.1.Name=signature&MessageAttribute.1.Value.DataType=String&MessageAttribute.1.Value.StringValue=$util.urlEncode($input.params('X-Hub-Signature'))#end
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseTemplates:
+                      application/json: '{"ok": true}'
+
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/ingest/
+      Handler: handler.handler
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          RAW_BUCKET: !Ref RawBucket
+          CONFLUENCE_BASE_URL: !Ref ConfluenceBaseUrl
+          CONFLUENCE_SECRET_ARN: !Ref ConfluenceSecretArn
+          SPACE_KEYS: !Ref SpaceKeys
+          WEBHOOK_SECRET: !Ref WebhookSecret
+      Policies:
+        - S3WritePolicy: { BucketName: !Ref RawBucket }
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref ConfluenceSecretArn
+      Events:
+        Sqs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventsQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  TriggerJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/lambdas/trigger_job/
+      Handler: handler.handler
+      Runtime: python3.12
+      Timeout: 30
+      Environment:
+        Variables:
+          DATABRICKS_SECRET_ARN: !Ref DatabricksSecretArn
+          DATABRICKS_JOB_ID: !Ref DatabricksJobId
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref DatabricksSecretArn
+      Events:
+        RawFileCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref RawBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: raw/ }
+                  - { Name: suffix, Value: .json }
+
+Outputs:
+  WebhookUrl:
+    Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod/confluence"
+  RawBucketName:
+    Value: !Ref RawBucket

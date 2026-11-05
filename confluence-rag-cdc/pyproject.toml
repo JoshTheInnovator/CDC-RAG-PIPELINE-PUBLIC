@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag_pipeline"
+version = "0.1.0"
+requires-python = ">=3.10"
+# pyspark / delta are provided by the Databricks runtime
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "langchain-text-splitters>=0.2",
+  "databricks-vectorsearch>=0.40",
+]
+
+[project.scripts]
+bronze = "rag_pipeline.bronze:main"
+silver = "rag_pipeline.silver:main"
+vector_sync = "rag_pipeline.vector_sync:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rag_pipeline*"]
